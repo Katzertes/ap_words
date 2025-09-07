@@ -1,0 +1,21 @@
+# developing memo
+notes.md
+
+# IDEの設定ファイルを無視する
+.vscode/
+.idea/
+
+# macOSのシステムファイルを無視する
+.DS_Store
+
+# ビルド時に生成されるファイルを無視する
+/dist/
+*.log
+
+# Pythonの環境や一時ファイルを無視する
+__pycache__/
+*.pyc
+venv/
+
+# 秘密の情報を無視する
+.env
