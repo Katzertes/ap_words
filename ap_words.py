@@ -4,9 +4,9 @@
 """
 ap_words.py
 This Python script is for Japanese national exams for IT engineers.
-Version 0.02
+Version 0.03
 Author: Junichiro Higuchi
-Last updated: 2025-09-07
+Last updated: 2025-09-12
 
 概要:
 IPA応用情報技術者試験シラバス(PDF)を全選択コビペしたテキストファイルから、
@@ -25,20 +25,77 @@ HEADPAT = r'^[1-9]|[【➢（]|[①-⑳]|(?:[1-9][0-9])'
 
 DICTIONARY = [] # 検出した用語のすべてを格納するグローバル変数
 RUNMODE = "normal" # コマンド指定による全体的な動作モード
-
-def print_usage():
-    msg = """
-    Usage: ap_words.py <command> <filename>
-    <filename>: IPAシラバスを全選択コピペしたテキストファイル
-    <command>:
-        normal(default) : 通常の処理。「用語解説お願い」以外のテキストも出力する。
-        ask : 用語解説お願いテキストのみを出力する。
-        dict : 用語のみを出力する。
-    """
-    print(clean_text(msg))
+DEFAULT_ASK_FILE = "ap_words_asks.txt"
 
 def clean_text(text: str) -> str:
     return dedent(text).strip()
+
+def read_paragraphs(filename) -> list:
+    """
+    テキストファイルを読み込み、空行で区切られた段落をリストとして返す。
+    エラー発生時は空のリストを返す。
+    使用例
+    file_path = 'sample.txt'
+    result_paragraphs = read_paragraphs(file_path)
+    for i, p in enumerate(result_paragraphs, 1):
+        print(f"--- 段落 {i} ---")
+        print(p)
+    """
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            paragraphs = []
+            current_paragraph = []
+
+            for line in f:
+                if line.strip() == '':
+                    if current_paragraph:
+                        paragraphs.append(''.join(current_paragraph).strip())
+                        current_paragraph = []
+                else:
+                    current_paragraph.append(line)
+
+            if current_paragraph:
+                paragraphs.append(''.join(current_paragraph).strip())
+
+        # for txt in paragraphs:
+        #     print(txt,"\n",file=sys.stderr)
+        return paragraphs
+
+    except FileNotFoundError:
+        print(f"Error: ファイル '{filename}' が見つかりません。",file=sys.stderr)
+        return []  # エラー時に空のリストを返す
+
+    except Exception as e:
+        print(f"Error: {e}",file=sys.stderr)
+        return []
+
+def get_ask_prompt(filename: str, para_id: list) -> str:
+    """
+    Args:
+        filename: プロンプト文の格納されてるテキストファイル。
+        id: プロンプト文に追加する段落のリスト
+    """
+    ask_default = clean_text("\
+    以下の用語の解説を、基本的に400文字以内、複雑な場合は最大700文字で、表形式でまとめてください。\n\
+    文体は簡潔にするために、「だ・である」系や体言止めでお願いします。")
+    if filename == "":
+        return ask_default
+    asks = read_paragraphs(filename)
+    if not asks:
+        return ask_default
+
+    # 指定された番号の段落をプロンプト文に追加していく
+    ask = ""
+    for i, txt in enumerate(asks, start=1):
+        if i in para_id:
+            if ask == "":
+                ask = txt + "\n"
+            else:
+                ask += "|\n" + txt + "\n"
+
+    if ask == "":
+        ask = ask_default
+    return clean_text(ask)
 
 def preprocess_line(text: str) -> str:
     """
@@ -74,6 +131,8 @@ def listup_wordlines(wordlines) -> list:
     半角()や全角（）で囲まれた部分の中にある「、」「，」は区切り文字としない。
     このようにして作られた yougo リストを戻り値とする。
     """
+    global DICTIONARY
+
     # すべての行を結合し、前後の空白と改行を削除
     full_text = "".join(line.strip() for line in wordlines)
 
@@ -117,7 +176,7 @@ def print_line(text):
         case "normal":
             print(text.strip(), file=sys.stdout)
 
-def process_text_file(filename):
+def process_text_file(filename,ask_txt):
     h1txt = "" # 見出し1テキスト
     h2txt = "" # 見出し2テキスト
     num1str = 0 # 見出し1番号文字列
@@ -172,7 +231,7 @@ def process_text_file(filename):
                         #  用語例の行があったのならそれを用語に分解し、AI用プロンプトテキストとして出力する
                         if wordlines:
                             tango = listup_wordlines(wordlines)
-                            print_ai_prompt(h1txt_prev, h2txt_prev, tango)
+                            print_ai_prompt(h1txt_prev, h2txt_prev, tango, ask_txt)
                             wordlines = []
                         print_line(f"\n{midashistr}")
                         midashistr = ""
@@ -186,7 +245,7 @@ def process_text_file(filename):
             # ファイルの最後に用語が残っている場合に出力処理
             if wordlines:
                 tango = listup_wordlines(wordlines)
-                print_ai_prompt(h1txt, h2txt, tango)
+                print_ai_prompt(h1txt, h2txt, tango, ask_txt)
 
     except FileNotFoundError:
         print(f"ファイル '{filename}' が見つかりません。")
@@ -195,10 +254,9 @@ def process_text_file(filename):
     except BrokenPipeError:
         sys.exit(0)
 
-def print_ai_prompt(h1txt, h2txt, tango):
+def print_ai_prompt(h1txt, h2txt, tango, ask_txt):
     if RUNMODE == "dict":
         return
-    # print(f"[DEBUG] {h1txt} {h2txt}")
     midashi_text = ""
     if h1txt and h2txt:
         midashi_text = f"「{h1txt}」における「{h2txt}」"
@@ -209,16 +267,30 @@ def print_ai_prompt(h1txt, h2txt, tango):
     
     if h1txt:
         print(f"", file=sys.stdout)
-    print(f"""_ask
-応用情報処理試験の出題範囲{midashi_text}について、
-以下の用語に関する解説(基本的には400文字以内で、内容が複雑な場合は最大600文字、
-意味が単純なら文字数に合わせず簡潔にまとめてもいい)を、表形式でまとめてください。
-なお、文体は簡潔にするために、「だ・である」系や体言止めでお願いします。""", file=sys.stdout)
+    print(f"_ask\n応用情報処理試験の出題範囲{midashi_text}について、\n{ask_txt}")
     for word in tango:
         print(word, file=sys.stdout)
     print(file=sys.stdout)  # 行間を空ける
 
 # ----------------------------------------------------------------
+def print_usage():
+    msg = f"""
+ap_words.py - 応用情報技術者試験のシラバスから用語を抜き出しプロンプト文を作成する
+概要
+    ap_words.py [コマンド] <ファイル名> [オプション]
+コマンド
+    normal 通常処理。用語解説依頼テキスト以外の情報も出力します。(default)
+    ask    用語解説依頼テキストのみを出力します。
+    dict   用語リストのみを出力します。
+引数
+    <ファイル名> IPAシラバスの全選択コピペしたテキスト。省略不可。
+オプション
+    -a, --ask <ファイル名 | 段落番号>
+        <ファイル名> : プロンプトテキストのファイル名を指定します。
+        <段落番号>       : 使用するテキストの段落番号（1〜）を指定します。複数指定可能
+"""
+    print(clean_text(msg))
+
 if __name__ == '__main__':
     try:
         if len(sys.argv) < 2:
@@ -226,11 +298,33 @@ if __name__ == '__main__':
             sys.exit(1)
 
         # 引数解析部分
-        for i, arg in enumerate(sys.argv[1:], 1):
+        prompt_id = [] # 挿入するプロンブト文の段落。複数指定できるのでリストにしている。
+        prompt_file = "" # プロンプト文のファイル
+
+        i = 1
+        while i < len(sys.argv):
+            arg = sys.argv[i]
             match arg:
                 case 'help' | '--help' | '-h':
                     print_usage()
                     sys.exit(0)
+                case '-a'| '--ask':
+                    if i + 1 < len(sys.argv):
+                        arg_a = sys.argv[i + 1]
+                        # 段落番号の場合
+                        if arg_a.isdigit():
+                            prompt_id.append(int(arg_a))
+                            if prompt_file == "":
+                                prompt_file = DEFAULT_ASK_FILE
+                        # ファイル名の場合
+                        else:
+                            prompt_file = arg_a
+                            if prompt_id == []:
+                                prompt_id.append(1)
+                        i += 1 # -a の次の引数も処理したものとして、インデックスを1つ進める
+                    else:
+                        print("Error: -a の後にファイル名か段落番号を指定してください。",file=sys.stderr)
+                        sys.exit(1)
                 case 'dict':
                     RUNMODE = "dict"
                 case 'ask':
@@ -239,8 +333,15 @@ if __name__ == '__main__':
                     RUNMODE = "normal"
                 case _:
                     filename_syllabus = arg
+            i += 1
 
-        process_text_file(filename_syllabus)
+        # プロンプト文の読み込み
+        ask_txt = get_ask_prompt(prompt_file, prompt_id)
+
+        # メイン処理部分
+        process_text_file(filename_syllabus, ask_txt)
+
+        # 辞書モードなら、用語リストを出力
         if RUNMODE == "dict":
             print("\n".join(DICTIONARY), file=sys.stdout)
 
@@ -249,4 +350,5 @@ if __name__ == '__main__':
         sys.exit(1)
 
 
-    
+
+
