@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ap_words.py
-This Python script is for Japanese national exams for IT engineers.
+情報処理技術者試験のシラバスから用語を抽出し、プロンプト文を生成します。
 Author: Junichiro Higuchi
 ----------------------------------------------------------------
 """
@@ -10,266 +10,353 @@ Author: Junichiro Higuchi
 import re
 import sys
 import argparse
+import io
 from textwrap import dedent
+from pathlib import Path
+from datetime import date
+from typing import Generator, Any, TextIO, List, Iterable, Set
 
-# 用語例記述の段落が終了したと判断する行頭のパターン
-HEADPAT = r'^[1-9]|[【➢（]|[①-⑳]|(?:[1-9][0-9])'
-
-DICTIONARY = [] # 検出した用語のすべてを格納するグローバル変数
-RUNMODE = "normal" # コマンド指定による全体的な動作モード
+# --- 定数 ---
 DEFAULT_ASK_FILE = "ap_words_asks.txt"
-DEFAULT_SYLLABUS_FILE = "ap_syllabus.txt"
+
+# ----------------------------------------
+# ヘルパー関数
 
 def clean_text(text: str) -> str:
-    """テキストからインデントを削除し、前後の空白を削除します。"""
+    """テキストのインデントを削除し、前後の空白を取り除きます。"""
     return dedent(text).strip()
 
-def read_paragraphs(filename) -> list:
+def read_paragraphs(filename: str) -> list:
     """
-    テキストファイルを読み込み、空行で区切られた段落をリストとして返す。
-    エラー発生時は空のリストを返す。
+    テキストファイルを読み込み、空行で区切られた段落のリストを返します。
+    エラーの場合は空のリストを返します。
     """
     try:
         with open(filename, 'r', encoding='utf-8') as f:
-            paragraphs = []
-            current_paragraph = []
-
-            for line in f:
-                if line.strip() == '':
-                    if current_paragraph:
-                        paragraphs.append(''.join(current_paragraph).strip())
-                        current_paragraph = []
-                else:
-                    current_paragraph.append(line)
-
-            if current_paragraph:
-                paragraphs.append(''.join(current_paragraph).strip())
-        return paragraphs
-
+            # 連続した空行を区切り文字として段落に分割
+            return [p.strip() for p in f.read().split('\n\n') if p.strip()]
     except FileNotFoundError:
-        print(f"Error: ファイル '{filename}' が見つかりません。",file=sys.stderr)
+        print(f"エラー: ファイル '{filename}' が見つかりません。", file=sys.stderr)
         return []
-
     except Exception as e:
-        print(f"Error: {type(e).__name__}:{e}",file=sys.stderr)
+        print(f"エラー: {type(e).__name__}:{e}", file=sys.stderr)
         return []
 
 def get_ask_prompt(filename: str, para_id: list) -> str:
     """
+    AIへのプロンプト文を構築します。
+    
     Args:
-        filename: プロンプト文の格納されてるテキストファイル。
-        id: プロンプト文に追加する段落のリスト
+        filename: プロンプト文が格納されたテキストファイル。
+        para_id: プロンプト文に含める段落番号のリスト。
     """
-    ask_default = clean_text("\
-    以下の用語の解説を、基本的に400文字以内、複雑な場合は最大700文字で、表形式でまとめてください。\n\
-    文体は簡潔にするために、「だ・である」系や体言止めでお願いします。")
+    ask_default = clean_text("""
+    以下の用語の解説を、基本的に400文字以内、複雑な場合は最大700文字で、表形式でまとめてください。
+    文体は簡潔にするために、「だ・である」系や体言止めでお願いします。
+    """)
 
-    # 段落を asks に読み込む
     if not filename:
         return ask_default
+    
     asks = read_paragraphs(filename)
     if not asks:
         return ask_default
 
-    # 無効な段落番号が含まれている場合は全体無効として入力処理につなげる
-    for id in para_id:
-        if id > len(asks):
-            para_id = []
-            break
+    # 段落番号が有効かチェック
+    is_id_valid = all(0 < i <= len(asks) for i in para_id)
 
-    # 段落番号指定がされていない場合は入力
-    if not para_id:
-        # p_asks = [f"{i}) {a[:200]}..." for i, a in enumerate(asks, start=1)]
-        p_asks = [f"{i}) {a}" for i, a in enumerate(asks, start=1)]
+    # 段落番号の指定がない、または無効な場合はユーザーに入力を求める
+    if not para_id or not is_id_valid:
+        print("\n--- プロンプト文の選択 ---", file=sys.stderr)
+        p_asks = [f"[{i:2d}] {a[:30]}..." for i, a in enumerate(asks, start=1)]
         print("\n".join(p_asks), file=sys.stderr)
-        print("="*20, file=sys.stderr)
+        print("="*40, file=sys.stderr)
+        
         while True:
-            s = input("出力する段落を(複数ある場合カンマ区切り)で入力してください。>>")
             try:
+                s = input("使用する段落をカンマ区切りで入力してください: >> ")
                 parts = s.split(',')
                 tmp = [int(n.strip()) for n in parts]
                 para_id = [n for n in tmp if 0 < n <= len(asks)]
-                if not para_id:
-                    print(f"有効な段落番号が入力されませんでした。1から{len(asks)}までの範囲で入力してください。", file=sys.stderr)
-                    continue
+                if para_id:
+                    break
+                print(f"無効な入力です。1から{len(asks)}までの数字を入力してください。", file=sys.stderr)
             except ValueError:
-                print("エラー: 数字とカンマ（,）のみで入力してください。", file=sys.stderr)
+                print("エラー: 数字とカンマのみで入力してください。", file=sys.stderr)
             except Exception as e:
-                print(f"予期せぬエラーが発生しました: {type(e).__name__} - {e}", file=sys.stderr)
-            else:
-                break
+                print(f"予期せぬエラーが発生しました: {e}", file=sys.stderr)
 
-    ask = ""
-    for i, txt in enumerate(asks, start=1):
-        if i in para_id:
-            if not ask:
-                ask = txt + "\n"
-            else:
-                ask += "|\n" + txt + "\n"
-
-    return clean_text(ask) if ask else ask_default
+    selected_prompts = [asks[i-1] for i in para_id]
+    # 複数のプロンプト文がある場合はパイプ記号で区切る
+    return "\n|\n".join(selected_prompts) if selected_prompts else ask_default
 
 def preprocess_line(text: str) -> str:
-    """
-    pdfからコピペしたシラバステキストの前処理を行います。
-    Args:
-        text (str): 編集する文字列。
-    Returns:
-        str: 編集後の文字列。
-    """
-    text = re.sub(r"\.{3,}", "...", text)
-    text = re.sub(r"^Copyright.*", "", text, flags=re.S)
-    text = re.sub(r"-\d{1,3}-", "", text)
+    """シラバスPDFからコピーしたテキストの1行を前処理します。"""
+    text = re.sub(r"\.{3,}", "...", text)  # 長すぎるドットリーダーを短縮
+    text = re.sub(r"^Copyright\(c\) Information.*", "", text)  # Copyright行を削除
+    text = re.sub(r"^-\d{1,3}-$", "", text)  # ページ番号行を削除
+    text = re.sub(r'^[\s\u3000\ufeff\u200b]+', '', text)  # 行頭の空白や不可視文字を削除
     return text.strip()
 
+# ----------------------------------------
+# 中核ロジック関数
 
-def listup_wordlines(wordlines) -> list:
+def listup_wordlines(wordlines: List[str]) -> list:
     """
-    wordlinesの中身を1行ずつ処理して、単語を取り出し、yougo リストに追加する。
+    複数行のテキストを結合し、括弧の外にある「、」または「，」で区切られた用語を抽出します。
     """
-    global DICTIONARY
-
-    full_text = "".join(line.strip() for line in wordlines)
-
+    full_text = "".join(line for line in wordlines)
     yougo = []
     current_word = ""
-    in_parentheses = False
+    in_parentheses = 0  # 括弧のネストレベル
 
     for char in full_text:
-        if char == '(' or char == '（':
-            in_parentheses = True
-        elif char == ')' or char == '）':
-            in_parentheses = False
+        if char in '（(':
+            in_parentheses += 1
+        elif char in '）)':
+            if in_parentheses > 0:
+                in_parentheses -= 1
         
-        if not in_parentheses and (char == '、' or char == '，'):
-            if current_word:
-                insertword = current_word.strip()
-                if insertword not in DICTIONARY:
-                    DICTIONARY.append(insertword)
-                yougo.append(insertword)
+        # 括弧の外にある読点（区切り文字）を検出
+        if in_parentheses == 0 and char in '、，':
+            if current_word.strip():
+                yougo.append(current_word.strip())
             current_word = ""
         else:
             current_word += char
 
-    if current_word:
+    # 最後の単語を追加
+    if current_word.strip():
         yougo.append(current_word.strip())
 
-    return yougo    
+    return yougo
 
-def print_line(text, output_stream):
+def parse_syllabus(filename: str) -> Generator[dict, None, None]:
     """
-    動作モードに応じて、テキストを出力する。
+    シラバスファイルを解析し、構造化されたデータブロックをyieldするジェネレータです。
+    この関数は解析のみに専念し、出力形式には関与しません。
     """
-    match RUNMODE:
-        case "normal":
-            print(text.strip(), file=output_stream)
-
-def process_text_file(filename, ask_txt, output_stream):
     h1txt = ""
     h2txt = ""
     wordlines = []
-    midashistr = ""
+    
+    with open(filename, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = preprocess_line(line)
+            if not line: continue
 
-    try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = preprocess_line(line)
-                if not line: continue
+            # ▼▼▼ 変更点: 目次行の判定ロジックを追加 ▼▼▼
+            # 行末が「...」と数字で終わる場合は目次行とみなし、通常のテキストとして処理する
+            if re.search(r'\s*\.{3,}\s*\d+$', line):
+                yield {'type': 'text', 'text': line}
+                continue
+            # ▲▲▲ 変更点 ▲▲▲
 
-                if midashistr:
-                    # 見出しがある場合は先にその行を出力
-                    print_line(f"\n{midashistr}", output_stream)
-                    midashistr = ""
+            # --- 各階層の見出しに対応する正規表現 ---
+            m_class_match = re.match(r'大分類(\d+|[\uff10-\uff19]+)[:：](.+)\s+中分類(\d+|[\uff10-\uff19]+)[:：](.+)', line)
+            m3_match = re.match(r'^\s*(\d+)\.\s+(.*)', line)
+            m1_match = re.match(r'^\s*[\(（](\d|[\uff10-\uff19]+)[\)）]\s*(.*)', line)
+            m2_match = re.match(r'^\s*([①-⑳])\s*(.*)', line)
+            m_sub_match = re.match(r'^\s*[\(（]([a-z])[\)）]\s*(.*)', line)
+            m_word_start = re.match(r'^\s*用語例(.*)', line)
+            
+            # --- 現在の「用語例」ブロックを終了させるためのロジック ---
+            is_header_or_class = m_class_match or m3_match or m1_match or m2_match or m_sub_match
+            if wordlines and (is_header_or_class or m_word_start):
+                yield {'type': 'word_block', 'h1': h1txt, 'h2': h2txt, 'words': listup_wordlines(wordlines)}
+                wordlines = []
+            
+            # --- マッチしたパターンに基づいて現在の行を処理 ---
+            if m_class_match:
+                h1txt, h2txt = "", "" # 文脈をリセット
+                full_title = f"大分類{m_class_match.group(1)}：{m_class_match.group(2).strip()} 中分類{m_class_match.group(3)}：{m_class_match.group(4).strip()}"
+                link_text = f"中分類{m_class_match.group(3)}：{m_class_match.group(4).strip()}"
+                yield {'type': 'header', 'level': 1, 'text': link_text, 'full_title': full_title}
+            elif m3_match:
+                h1txt = m3_match.group(2).strip()
+                h2txt = ""
+                yield {'type': 'header', 'level': 2, 'text': f"{m3_match.group(1)}. {h1txt}"}
+            elif m1_match:
+                h2txt = m1_match.group(2).strip() # このレベルではh2txtを使用
+                yield {'type': 'header', 'level': 3, 'text': f"({m1_match.group(1)}) {h2txt}"}
+            elif m2_match:
+                # このレベルではプロンプト用のh1/h2文脈を更新しない
+                yield {'type': 'header', 'level': 4, 'text': f"{m2_match.group(1)} {m2_match.group(2).strip()}"}
+            elif m_sub_match:
+                yield {'type': 'text', 'text': line}
+            elif m_word_start:
+                wordlines.append(m_word_start.group(1).strip())
+            elif wordlines:
+                wordlines.append(line)
+            else:
+                yield {'type': 'text', 'text': line}
+        
+        # ファイル末尾に残っている用語例ブロックを処理
+        if wordlines:
+            yield {'type': 'word_block', 'h1': h1txt, 'h2': h2txt, 'words': listup_wordlines(wordlines)}
 
-                if m1_match := re.match(r'^\s*[\(（](\d|[\uff10-\uff19]+)[\)）]\s*(.*)', line):
-                    num1str = m1_match.group(1).strip()
-                    h1txt = m1_match.group(2).strip()
-                    h2txt = ""
-                    midashistr = f"({num1str}) {h1txt}"
-                elif m2_match := re.match(r'^\s*([①-⑳])\s*(.*)', line):
-                    num2str = m2_match.group(1).strip()
-                    h2txt = m2_match.group(2).strip()
-                    midashistr = f"{num2str} {h2txt}"
-                elif re.match(r'^\s*用語例', line):
-                    # 「用語例」が見つかったら、これまでの用語を処理
-                    if wordlines:
-                        tango = listup_wordlines(wordlines)
-                        print_ai_prompt(h1txt, h2txt, tango, ask_txt, output_stream)
-                        wordlines = []
-                    # 次の行から用語をキャプチャ開始
-                    wordlines.append(re.sub(r'^\s*用語例\s*', '', line).strip())
-                elif wordlines:
-                    # 用語例キャプチャモード
-                    if not re.match(HEADPAT, line) or not line.strip():
-                        wordlines.append(line.strip())
-                    else:
-                        # 用語例の終わり
-                        tango = listup_wordlines(wordlines)
-                        print_ai_prompt(h1txt, h2txt, tango, ask_txt, output_stream)
-                        wordlines = []
-                        print_line(line, output_stream)
-                else:
-                    # 通常モード
-                    print_line(line, output_stream)
+# ----------------------------------------
+# 出力整形関数
 
-            # ファイルの最後に用語が残っている場合に出力処理
-            if wordlines:
-                tango = listup_wordlines(wordlines)
-                print_ai_prompt(h1txt, h2txt, tango, ask_txt, output_stream)
-
-    except FileNotFoundError:
-        print(f"ファイル '{filename}' が見つかりません。", file=sys.stderr)
-        sys.exit(1)
-
-def print_ai_prompt(h1txt, h2txt, tango, ask_txt, output_stream):
-    if RUNMODE == "dict":
-        return
+def format_prompt(h1txt: str, h2txt: str, words: List[str], ask_txt: str, out: TextIO):
+    """AIへのプロンプトテキストを整形して出力します。"""
     midashi_text = ""
     if h1txt and h2txt:
         midashi_text = f"「{h1txt}」における「{h2txt}」"
     elif h1txt:
         midashi_text = f"「{h1txt}」"
-    elif h2txt:
-        midashi_text = f"「{h2txt}」"
     
-    if h1txt:
-        print(f"", file=output_stream)
-    print(f"_ask\n応用情報処理試験の出題範囲{midashi_text}について、\n{ask_txt}", file=output_stream)
-    for word in tango:
-        print(word, file=output_stream)
-    print(file=output_stream)
+    print(f"\n_ask\n応用情報技術者試験のシラバスの{midashi_text}について、\n{ask_txt}", file=out)
+    for word in words:
+        print(word, file=out)
+    print(file=out)
+
+def output_results(structured_data: Iterable[dict], ask_txt: str, out: TextIO, use_md: bool, mode: str, level_offset: int = 0):
+    """
+    解析済みのデータを受け取り、モードとレベルオフセットに基づいて出力用に整形します。
+    """
+    for block in structured_data:
+        b_type = block.get('type')
+
+        if b_type == 'header':
+            if mode == "normal":
+                level = block.get('level', 1)
+                # レベルがオフセット後も1以上の場合のみ出力
+                if level - level_offset > 0:
+                    text = block.get('text', '').strip()
+                    prefix = "#" * (level - level_offset) + " " if use_md else ""
+                    print(f"\n{prefix}{text}", file=out)
+
+        elif b_type == 'text':
+            if mode == "normal":
+                print(block.get('text', '').strip(), file=out)
+
+        elif b_type == 'word_block':
+            words = block.get('words', [])
+            if not words: continue
+
+            if mode == "ask":
+                format_prompt(block['h1'], block['h2'], words, ask_txt, out)
+            elif mode == "normal":
+                print(f"\n用語例: {', '.join(words)}", file=out)
+                format_prompt(block['h1'], block['h2'], words, ask_txt, out)
+
+def handle_split_output(args: argparse.Namespace, ask_txt: str, structured_data: List[dict]):
+    """分割出力モードの処理を行います。"""
+    base_path = Path(args.output_file)
+    base_name = base_path.stem
+    ext = base_path.suffix
+
+    chunks = []
+    pre_content = []
+    current_chunk = []
+    
+    # データを中分類（レベル1ヘッダー）ごとに分割
+    first_header_found = False
+    for block in structured_data:
+        if block.get('type') == 'header' and block.get('level') == 1:
+            first_header_found = True
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = [block]
+        elif first_header_found:
+            current_chunk.append(block)
+        else:
+            pre_content.append(block)
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    # 1. 目次ファイルの作成
+    with open(base_path, 'w', encoding='utf-8') as f:
+        print("目次\n---", file=f)
+        for i, chunk in enumerate(chunks, 1):
+            chunk_title = chunk[0].get('text', f'無題{i}')
+            split_filename = f"{base_name}{i:02d}{ext}"
+            print(f"- [{chunk_title}]({split_filename})", file=f)
+        
+        print("\n---", file=f)
+        # 序文を出力
+        output_results(pre_content, ask_txt, f, True, "normal")
+
+    # 2. 各分割ファイルの作成
+    for i, chunk in enumerate(chunks, 1):
+        split_filename = base_path.parent / f"{base_name}{i:02d}{ext}"
+        full_title = chunk[0].get('full_title', '無題')
+        with open(split_filename, 'w', encoding='utf-8') as f:
+            # YAMLフロントマターの出力
+            print("---", file=f)
+            print(f"title: {full_title}", file=f)
+            print(f"date: {date.today().isoformat()}", file=f)
+            print("tags: [応用情報技術者試験, シラバス, 用語集]", file=f)
+            print("---\n", file=f)
+            
+            # 本文の先頭にタイトルを太字で出力
+            print(f"**{full_title}**\n", file=f)
+
+            # 最初のヘッダーを除いた内容を、レベルを1下げて出力
+            output_results(chunk[1:], ask_txt, f, True, "normal", level_offset=1)
+
+def handle_output(args: argparse.Namespace, ask_txt: str, structured_data: List[dict], master_dictionary: Set[str]):
+    """
+    引数に基づいて、単一出力または分割出力を実行します。
+    """
+    if args.split:
+        if not args.output_file:
+            print("エラー: 分割出力モード(-S)では出力ファイル名(-o)の指定が必須です。", file=sys.stderr)
+            sys.exit(1)
+        if not Path(args.output_file).suffix.lower() in (".md", ".markdown"):
+            print("エラー: 分割出力モードはMarkdown形式(.md, .markdown)でのみサポートされています。", file=sys.stderr)
+            sys.exit(1)
+        
+        handle_split_output(args, ask_txt, structured_data)
+        print(f"分割ファイルが {Path(args.output_file).stem}XX.md の形式で生成されました。", file=sys.stderr)
+
+    else: # 単一ファイル出力
+        use_md = args.output_file and Path(args.output_file).suffix.lower() in (".md", ".markdown")
+        output_target = args.output_file
+
+        def write_data(out_stream):
+            if args.mode == "dict":
+                print("\n".join(sorted(list(master_dictionary))), file=out_stream)
+            else:
+                output_results(structured_data, ask_txt, out_stream, use_md, args.mode)
+
+        if output_target:
+            try:
+                with open(output_target, 'w', encoding='utf-8') as f:
+                    write_data(f)
+            except Exception as e:
+                print(f"エラー: 出力ファイル '{output_target}' への書き込みに失敗しました。詳細: {e}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            write_data(sys.stdout)
+
+# ----------------------------------------
+# メイン実行ブロック
 
 def print_usage():
-    msg = f"""
-ap_words.py - 応用情報技術者試験のシラバスから用語を抜き出しプロンプト文を作成する
+    """コマンドラインの使用方法を出力します。"""
+    msg = """
+    ap_words.py - 応用情報技術者試験のシラバスから用語を抜き出しプロンプト文を作成する
 
-使用例
-    python ap_words.py ap.txt > ~/app.txt
-    python ap_words.py ap.txt -a 1,3 -o ~/app.txt
-    python ap_words.py ap.txt -a 99 -o ~/app.txt
+    書式:
+        python ap_words.py <シラバスファイル> [mode] [-a PROMPT] [-o 出力ファイル] [-S]
 
-書式
-    ap_words.py [-h] [-a ASK_PROMPT] [-o OUTPUT_FILE] [mode] filename_syllabus
+    引数:
+      シラバスファイル        必須。IPAシラバスをコピーしたテキストファイル。
 
-位置引数:
-  filename_syllabus     IPAシラバスの全選択コピペしたテキスト。省略不可。
+    コマンド:
+      normal (default)      通常処理。用語プロンプト以外の情報も出力します。
+      ask                   AIへの用語解説依頼プロンプトのみを出力します。
+      dict                  抽出した用語リストのみを出力します。
 
-オプション:
-  -h, --help            ヘルプメッセージを表示して終了します
-  -a, --ask [段落番号|ファイル名]
-                        <ファイル名>: プロンプトテキストのファイル名を指定します。
-                        <段落番号>: 使用するテキストの段落番号（1〜）を指定します。
-                                   複数指定する場合はカンマ区切りで入力します。
-                                   存在しない段落番号が含まれていると起動後に選択画面となります。
-  -o, --output OUTPUT_FILE
-                        結果を出力するファイル名を指定します。指定しない場合は標準出力に出力します。
-
-コマンド:
-  normal (default)      通常処理。用語解説依頼テキスト以外の情報も出力します。
-  ask                   用語解説依頼テキストのみを出力します。
-  dict                  用語リストのみを出力します。
-
-"""
+    オプション:
+      -h, --help            このヘルプメッセージを表示して終了します。
+      -a, --ask PROMPT      プロンプトテキストのファイル名、または段落番号(例: "1,3")を指定します。
+      -o, --output FILE     結果を出力するファイル名を指定します。指定しない場合は標準出力になります。
+                            拡張子が .md の場合、Markdown形式で出力します。
+      -s, -S, --split       出力を中分類ごとにMarkdownファイルに分割します (-oでのファイル指定が必須)。
+    """
     print(clean_text(msg))
 
 if __name__ == '__main__':
@@ -278,11 +365,12 @@ if __name__ == '__main__':
         formatter_class=argparse.RawTextHelpFormatter,
         add_help=False
     )
-    parser.add_argument('filename_syllabus', nargs='?', help="IPAシラバスの全選択コピペしたテキスト。")
-    parser.add_argument('mode', nargs='?', choices=['normal', 'ask', 'dict'], default='normal', help="コマンド")
-    parser.add_argument('-h', '--help', action='store_true', help="ヘルプメッセージを表示して終了します")
-    parser.add_argument('-a', '--ask', dest='ask_prompt', help="プロンプトテキストのファイル名か、段落番号を指定します。")
-    parser.add_argument('-o', '--output', dest='output_file', help="結果を出力するファイル名を指定します。")
+    parser.add_argument('filename_syllabus', nargs='?', help="IPAシラバスのテキストファイル。")
+    parser.add_argument('mode', nargs='?', choices=['normal', 'ask', 'dict'], default='normal', help="実行モード。")
+    parser.add_argument('-h', '--help', action='store_true', help="ヘルプメッセージを表示します。")
+    parser.add_argument('-a', '--ask', dest='ask_prompt', help="プロンプトファイルまたは段落番号。")
+    parser.add_argument('-o', '--output', dest='output_file', help="出力ファイル名。")
+    parser.add_argument('-s', '-S', '--split', action='store_true', help="出力を中分類ごとに分割します。")
 
     args = parser.parse_args()
 
@@ -291,41 +379,43 @@ if __name__ == '__main__':
         sys.exit(0)
 
     if not args.filename_syllabus:
-        print("読み込むシラバステキストのファイル名が指定されていません。", file=sys.stderr)
+        print("エラー: シラバスのファイル名が指定されていません。", file=sys.stderr)
         print_usage()
         sys.exit(1)
 
-    RUNMODE = args.mode
-
+    # --- ステップ1: プロンプト文の準備 ---
     prompt_id = []
     prompt_file = ""
     if args.ask_prompt:
         try:
-            # 段落番号の場合
+            # 引数が数字なら段落番号として解釈
             prompt_id = [int(n.strip()) for n in args.ask_prompt.split(',')]
             prompt_file = DEFAULT_ASK_FILE
         except ValueError:
-            # ファイル名の場合
+            # 数字でなければファイル名として解釈
             prompt_file = args.ask_prompt
-
     ask_txt = get_ask_prompt(prompt_file, prompt_id)
     
-    # 出力先の決定
-    if args.output_file:
-        try:
-            with open(args.output_file, 'w', encoding='utf-8') as f:
-                process_text_file(args.filename_syllabus, ask_txt, f)
-        except Exception as e:
-            print(f"Error: 出力ファイル '{args.output_file}' への書き込みに失敗しました。詳細: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        # 標準出力へ出力
-        process_text_file(args.filename_syllabus, ask_txt, sys.stdout)
+    # --- ステップ2: シラバスの解析とデータ集約 ---
+    # ジェネレータはここで一度だけ消費し、全データ構造を構築する
+    try:
+        structured_data = []
+        master_dictionary = set()
+        
+        results_generator = parse_syllabus(args.filename_syllabus)
+        for block in results_generator:
+            structured_data.append(block)
+            if block.get('type') == 'word_block' and block.get('words'):
+                master_dictionary.update(block['words'])
 
-    # 辞書モードなら、用語リストを出力
-    if RUNMODE == "dict":
-        if args.output_file:
-            with open(args.output_file, 'w', encoding='utf-8') as f:
-                print("\n".join(DICTIONARY), file=f)
-        else:
-            print("\n".join(DICTIONARY), file=sys.stdout)
+    except FileNotFoundError:
+        # エラーメッセージは parse_syllabus 内で処理済み
+        sys.exit(1)
+    except Exception as e:
+        print(f"解析中にエラーが発生しました: {e}", file=sys.stderr)
+        sys.exit(1)
+        
+    # --- ステップ3: 出力処理 ---
+    # 集約したデータをまとめて出力ハンドラに渡す
+    handle_output(args, ask_txt, structured_data, master_dictionary)
+

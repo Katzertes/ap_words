@@ -1,3 +1,11 @@
+# test file
+test*.txt
+test*.md
+ap_noedit.txt
+ap_*.md
+ap_*.txt
+test/
+
 # developing memo
 notes.md
 
